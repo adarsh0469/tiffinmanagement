@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: adarsh-tiffin-centre
+    env: node
+    buildCommand: npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+    disk:
+      name: tiffin-db-data
+      mountPath: /var/data
+      sizeGB: 1

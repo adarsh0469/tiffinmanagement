@@ -1,0 +1,17 @@
+{
+  "name": "adarsh-tiffin-centre-system",
+  "version": "1.0.0",
+  "description": "Adarsh Tiffin Centre Billing and Dispatch Management System",
+  "main": "server/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "npm install --prefix server && npm install --prefix client && npm run build --prefix client",
+    "start": "node server/index.js",
+    "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "server": "npm run dev --prefix server",
+    "client": "npm run dev --prefix client"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
