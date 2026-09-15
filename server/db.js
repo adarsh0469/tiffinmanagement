@@ -2,15 +2,25 @@ import sqlite3 from 'sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createClient } from '@libsql/client';
+import pg from 'pg';
+
+const { Pool } = pg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const dbPath = process.env.DB_PATH || path.join(__dirname, 'tiffin.db');
 
 let libsqlClient = null;
+let pgPool = null;
 let db = null;
 
-if (process.env.TURSO_DATABASE_URL) {
+if (process.env.DATABASE_URL && (process.env.DATABASE_URL.startsWith('postgres://') || process.env.DATABASE_URL.startsWith('postgresql://'))) {
+  console.log('⚡ Connecting to PostgreSQL Cloud Database via DATABASE_URL');
+  pgPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.PGDISABLESSL === 'true' ? false : { rejectUnauthorized: false }
+  });
+} else if (process.env.TURSO_DATABASE_URL) {
   console.log('⚡ Connecting to Turso Free Cloud SQLite database:', process.env.TURSO_DATABASE_URL);
   libsqlClient = createClient({
     url: process.env.TURSO_DATABASE_URL,
@@ -26,12 +36,41 @@ if (process.env.TURSO_DATABASE_URL) {
   });
 }
 
-// Helper wrapper for async database queries (supports both local SQLite and Turso Cloud)
+// Helper to convert SQLite SQL dialect & '?' placeholders to PostgreSQL '$1', '$2'...
+const transformPgSql = (sql) => {
+  let paramIdx = 1;
+  let pgSql = sql.replace(/\?/g, () => `$${paramIdx++}`);
+
+  if (pgSql.includes('INSERT OR IGNORE INTO')) {
+    pgSql = pgSql.replace(/INSERT OR IGNORE INTO/gi, 'INSERT INTO');
+    if (!pgSql.toUpperCase().includes('ON CONFLICT')) {
+      pgSql += ' ON CONFLICT DO NOTHING';
+    }
+  } else if (pgSql.includes('INSERT OR REPLACE INTO')) {
+    pgSql = pgSql.replace(/INSERT OR REPLACE INTO/gi, 'INSERT INTO');
+  }
+
+  return pgSql;
+};
+
+// Async query wrapper for PostgreSQL, Turso Cloud, and local SQLite
 export const runQuery = async (sql, params = []) => {
+  if (pgPool) {
+    let pgSql = transformPgSql(sql);
+    const isInsert = pgSql.trim().toUpperCase().startsWith('INSERT');
+    if (isInsert && !pgSql.toUpperCase().includes('RETURNING') && !pgSql.toUpperCase().includes('ON CONFLICT DO NOTHING')) {
+      pgSql += ' RETURNING id';
+    }
+    const res = await pgPool.query(pgSql, params);
+    const lastID = (res.rows && res.rows.length > 0 && res.rows[0].id) ? Number(res.rows[0].id) : 0;
+    return { lastID, changes: res.rowCount };
+  }
+
   if (libsqlClient) {
     const res = await libsqlClient.execute({ sql, args: params });
     return { lastID: Number(res.lastInsertRowid), changes: res.rowsAffected };
   }
+
   return new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
       if (err) reject(err);
@@ -41,10 +80,17 @@ export const runQuery = async (sql, params = []) => {
 };
 
 export const getRow = async (sql, params = []) => {
+  if (pgPool) {
+    const pgSql = transformPgSql(sql);
+    const res = await pgPool.query(pgSql, params);
+    return res.rows.length > 0 ? res.rows[0] : null;
+  }
+
   if (libsqlClient) {
     const res = await libsqlClient.execute({ sql, args: params });
     return res.rows.length > 0 ? res.rows[0] : null;
   }
+
   return new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => {
       if (err) reject(err);
@@ -54,10 +100,17 @@ export const getRow = async (sql, params = []) => {
 };
 
 export const getAll = async (sql, params = []) => {
+  if (pgPool) {
+    const pgSql = transformPgSql(sql);
+    const res = await pgPool.query(pgSql, params);
+    return res.rows;
+  }
+
   if (libsqlClient) {
     const res = await libsqlClient.execute({ sql, args: params });
     return res.rows;
   }
+
   return new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => {
       if (err) reject(err);
@@ -68,9 +121,12 @@ export const getAll = async (sql, params = []) => {
 
 // Initialize schema
 export const initDb = async () => {
+  const pkType = pgPool ? 'SERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+  const tsType = pgPool ? 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP' : 'DATETIME DEFAULT CURRENT_TIMESTAMP';
+
   await runQuery(`
     CREATE TABLE IF NOT EXISTS customers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id ${pkType},
       name TEXT NOT NULL,
       phone TEXT NOT NULL,
       address TEXT,
@@ -84,13 +140,13 @@ export const initDb = async () => {
       status TEXT DEFAULT 'Active',
       start_date TEXT,
       notes TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at ${tsType}
     )
   `);
 
   await runQuery(`
     CREATE TABLE IF NOT EXISTS daily_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id ${pkType},
       customer_id INTEGER NOT NULL,
       date TEXT NOT NULL,
       meal_slot TEXT NOT NULL,
@@ -106,7 +162,7 @@ export const initDb = async () => {
 
   await runQuery(`
     CREATE TABLE IF NOT EXISTS payments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id ${pkType},
       customer_id INTEGER NOT NULL,
       amount REAL NOT NULL,
       payment_date TEXT NOT NULL,
@@ -114,30 +170,30 @@ export const initDb = async () => {
       is_advance INTEGER DEFAULT 0,
       month_year TEXT,
       notes TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      created_at ${tsType},
       FOREIGN KEY (customer_id) REFERENCES customers (id) ON DELETE CASCADE
     )
   `);
 
   await runQuery(`
     CREATE TABLE IF NOT EXISTS customer_leaves (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id ${pkType},
       customer_id INTEGER NOT NULL,
       from_date TEXT NOT NULL,
       to_date TEXT NOT NULL,
       reason TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      created_at ${tsType},
       FOREIGN KEY (customer_id) REFERENCES customers (id) ON DELETE CASCADE
     )
   `);
 
   await runQuery(`
     CREATE TABLE IF NOT EXISTS closed_days (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id ${pkType},
       date TEXT NOT NULL UNIQUE,
       reason TEXT,
       closed_by TEXT DEFAULT 'Owner',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at ${tsType}
     )
   `);
 
@@ -221,7 +277,7 @@ export const initDb = async () => {
 
   // Seed sample data if database is brand new
   const countObj = await getRow(`SELECT COUNT(*) as count FROM customers`);
-  if (countObj && countObj.count === 0) {
+  if (countObj && (countObj.count === 0 || countObj.count === '0')) {
     console.log('Seeding initial sample customers for Tiffin Centre...');
     await runQuery(`
       INSERT INTO customers (name, phone, address, meal_preference, diet_type, plan_type, rate_lunch, rate_dinner, monthly_rate, advance_balance, status, start_date, notes)
@@ -234,7 +290,7 @@ export const initDb = async () => {
 
     const todayStr = new Date().toISOString().split('T')[0];
     await runQuery(`
-      INSERT OR IGNORE INTO daily_logs (customer_id, date, meal_slot, status, extra_amount, extra_notes)
+      INSERT INTO daily_logs (customer_id, date, meal_slot, status, extra_amount, extra_notes)
       VALUES 
       (1, '${todayStr}', 'Lunch', 'Delivered', 0, ''),
       (1, '${todayStr}', 'Dinner', 'Delivered', 20, '2 Extra Rotis'),
