@@ -1,21 +1,37 @@
 import sqlite3 from 'sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createClient } from '@libsql/client';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const dbPath = process.env.DB_PATH || path.join(__dirname, 'tiffin.db');
 
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Error connecting to SQLite database:', err.message);
-  } else {
-    console.log('Connected to local SQLite database at:', dbPath);
-  }
-});
+let libsqlClient = null;
+let db = null;
 
-// Helper wrapper for async database queries
-export const runQuery = (sql, params = []) => {
+if (process.env.TURSO_DATABASE_URL) {
+  console.log('⚡ Connecting to Turso Free Cloud SQLite database:', process.env.TURSO_DATABASE_URL);
+  libsqlClient = createClient({
+    url: process.env.TURSO_DATABASE_URL,
+    authToken: process.env.TURSO_AUTH_TOKEN || ''
+  });
+} else {
+  db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+      console.error('Error connecting to SQLite database:', err.message);
+    } else {
+      console.log('Connected to local SQLite database at:', dbPath);
+    }
+  });
+}
+
+// Helper wrapper for async database queries (supports both local SQLite and Turso Cloud)
+export const runQuery = async (sql, params = []) => {
+  if (libsqlClient) {
+    const res = await libsqlClient.execute({ sql, args: params });
+    return { lastID: Number(res.lastInsertRowid), changes: res.rowsAffected };
+  }
   return new Promise((resolve, reject) => {
     db.run(sql, params, function (err) {
       if (err) reject(err);
@@ -24,7 +40,11 @@ export const runQuery = (sql, params = []) => {
   });
 };
 
-export const getRow = (sql, params = []) => {
+export const getRow = async (sql, params = []) => {
+  if (libsqlClient) {
+    const res = await libsqlClient.execute({ sql, args: params });
+    return res.rows.length > 0 ? res.rows[0] : null;
+  }
   return new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => {
       if (err) reject(err);
@@ -33,7 +53,11 @@ export const getRow = (sql, params = []) => {
   });
 };
 
-export const getAll = (sql, params = []) => {
+export const getAll = async (sql, params = []) => {
+  if (libsqlClient) {
+    const res = await libsqlClient.execute({ sql, args: params });
+    return res.rows;
+  }
   return new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => {
       if (err) reject(err);
