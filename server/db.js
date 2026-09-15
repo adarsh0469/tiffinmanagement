@@ -204,6 +204,18 @@ export const initDb = async () => {
     )
   `);
 
+  // High-performance database indexing
+  try {
+    await runQuery(`CREATE INDEX IF NOT EXISTS idx_daily_logs_date ON daily_logs(date)`);
+    await runQuery(`CREATE INDEX IF NOT EXISTS idx_daily_logs_cust_date ON daily_logs(customer_id, date)`);
+    await runQuery(`CREATE INDEX IF NOT EXISTS idx_payments_cust ON payments(customer_id)`);
+    await runQuery(`CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(payment_date)`);
+    await runQuery(`CREATE INDEX IF NOT EXISTS idx_leaves_dates ON customer_leaves(from_date, to_date)`);
+    await runQuery(`CREATE INDEX IF NOT EXISTS idx_closed_days_date ON closed_days(date)`);
+  } catch (e) {
+    // Indexes already exist or not supported
+  }
+
   // Safe migration checks for existing columns
   try {
     await runQuery(`ALTER TABLE customers ADD COLUMN advance_balance REAL DEFAULT 0.0`);

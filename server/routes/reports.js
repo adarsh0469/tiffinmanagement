@@ -4,7 +4,7 @@ import { getDaysInMonth, formatDateLocal } from '../utils/dateUtils.js';
 
 const router = express.Router();
 
-// GET /api/reports
+// GET /api/reports - Optimized bulk queries
 router.get('/', async (req, res) => {
   try {
     const {
@@ -46,18 +46,25 @@ router.get('/', async (req, res) => {
     const customers = await getAll(custSql, custParams);
 
     if (type === 'delivery') {
-      // Aggregate delivery counts per customer and totals
+      // Bulk query daily logs for all filtered customers
+      const allLogs = await getAll(
+        `SELECT customer_id, meal_slot, status FROM daily_logs WHERE date >= ? AND date <= ?`,
+        [startDate, endDate]
+      );
+
+      const logsMap = {};
+      allLogs.forEach(l => {
+        if (!logsMap[l.customer_id]) logsMap[l.customer_id] = [];
+        logsMap[l.customer_id].push(l);
+      });
+
       let totalLunchDelivered = 0;
       let totalDinnerDelivered = 0;
       let totalSkipped = 0;
       const customerDeliveryList = [];
 
-      for (const c of customers) {
-        const logs = await getAll(
-          `SELECT * FROM daily_logs WHERE customer_id = ? AND date >= ? AND date <= ?`,
-          [c.id, startDate, endDate]
-        );
-
+      customers.forEach(c => {
+        const logs = logsMap[c.id] || [];
         let lunchCount = 0;
         let dinnerCount = 0;
         let skipCount = 0;
@@ -86,7 +93,7 @@ router.get('/', async (req, res) => {
           skipCount,
           totalDelivered: lunchCount + dinnerCount
         });
-      }
+      });
 
       return res.json({
         success: true,
@@ -104,7 +111,6 @@ router.get('/', async (req, res) => {
     }
 
     if (type === 'customer') {
-      // Customer directory report with plan details, rates, balances
       const customerRows = customers.map(c => ({
         id: c.id,
         name: c.name,
@@ -139,23 +145,33 @@ router.get('/', async (req, res) => {
       });
     }
 
-    // Default: 'billing' report
+    // Default: 'billing' report with bulk parallel queries
+    const [allLogs, allPayments] = await Promise.all([
+      getAll(`SELECT customer_id, meal_slot, status, extra_amount, applied_lunch_rate, applied_dinner_rate FROM daily_logs WHERE date >= ? AND date <= ?`, [startDate, endDate]),
+      getAll(`SELECT customer_id, amount, is_advance FROM payments WHERE month_year = ? OR payment_date LIKE ?`, [month, `${month}%`])
+    ]);
+
+    const logsMap = {};
+    allLogs.forEach(l => {
+      if (!logsMap[l.customer_id]) logsMap[l.customer_id] = [];
+      logsMap[l.customer_id].push(l);
+    });
+
+    const paymentsMap = {};
+    allPayments.forEach(p => {
+      if (!paymentsMap[p.customer_id]) paymentsMap[p.customer_id] = [];
+      paymentsMap[p.customer_id].push(p);
+    });
+
     const billingRows = [];
     let grandTotalBilled = 0;
     let grandTotalPaid = 0;
     let grandTotalPending = 0;
     let grandTotalAdvance = 0;
 
-    for (const c of customers) {
-      const logs = await getAll(
-        `SELECT * FROM daily_logs WHERE customer_id = ? AND date >= ? AND date <= ?`,
-        [c.id, startDate, endDate]
-      );
-
-      const payments = await getAll(
-        `SELECT * FROM payments WHERE customer_id = ? AND (month_year = ? OR payment_date LIKE ?)`,
-        [c.id, month, `${month}%`]
-      );
+    customers.forEach(c => {
+      const logs = logsMap[c.id] || [];
+      const payments = paymentsMap[c.id] || [];
 
       let lCount = 0;
       let dCount = 0;
@@ -212,7 +228,7 @@ router.get('/', async (req, res) => {
         advanceApplied,
         netDue
       });
-    }
+    });
 
     return res.json({
       success: true,

@@ -131,9 +131,8 @@ router.post('/batch', async (req, res) => {
     const leaves = await getAll(`SELECT customer_id FROM customer_leaves WHERE from_date <= ? AND to_date >= ?`, [date, date]);
     const leaveSet = new Set(leaves.map(l => l.customer_id));
 
-    let updatedCount = 0;
-    for (const c of customers) {
-      if (leaveSet.has(c.id)) continue; // Skip customer on leave
+    const tasks = customers.map(async (c) => {
+      if (leaveSet.has(c.id)) return false; // Skip customer on leave
 
       let isEligible = false;
       if (c.meal_preference === 'Both') isEligible = true;
@@ -153,9 +152,13 @@ router.post('/batch', async (req, res) => {
              applied_dinner_rate = CASE WHEN COALESCE(daily_logs.applied_dinner_rate, 0) > 0 THEN daily_logs.applied_dinner_rate ELSE excluded.applied_dinner_rate END`,
           [c.id, date, meal_slot, status, lRate, dRate]
         );
-        updatedCount++;
+        return true;
       }
-    }
+      return false;
+    });
+
+    const results = await Promise.all(tasks);
+    const updatedCount = results.filter(Boolean).length;
 
     res.json({ success: true, count: updatedCount, message: `Successfully batch updated ${updatedCount} ${meal_slot} meals as ${status} for ${date}` });
   } catch (err) {

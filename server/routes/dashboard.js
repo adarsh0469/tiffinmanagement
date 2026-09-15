@@ -3,7 +3,7 @@ import { getRow, getAll } from '../db.js';
 
 const router = express.Router();
 
-// Executive dashboard metrics
+// Executive dashboard metrics - High performance optimized bulk queries
 router.get('/stats', async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
@@ -43,30 +43,50 @@ router.get('/stats', async (req, res) => {
       [currentMonth, `${currentMonth}%`]
     );
 
-    // Calculate total pending for all active customers for current month
+    // Fast bulk calculation of total billed and pending for current month
     const startDate = `${currentMonth}-01`;
     const endDate = `${currentMonth}-31`;
+
+    const [allCustomers, allLogs, allPayments] = await Promise.all([
+      getAll(`SELECT * FROM customers WHERE status != 'Inactive'`),
+      getAll(`SELECT customer_id, meal_slot, status, extra_amount, applied_lunch_rate, applied_dinner_rate FROM daily_logs WHERE date >= ? AND date <= ?`, [startDate, endDate]),
+      getAll(`SELECT customer_id, amount FROM payments WHERE month_year = ? OR payment_date LIKE ?`, [currentMonth, `${currentMonth}%`])
+    ]);
+
+    // Build fast in-memory lookup maps
+    const logsMap = {};
+    allLogs.forEach(log => {
+      if (!logsMap[log.customer_id]) logsMap[log.customer_id] = [];
+      logsMap[log.customer_id].push(log);
+    });
+
+    const paymentsMap = {};
+    allPayments.forEach(p => {
+      paymentsMap[p.customer_id] = (paymentsMap[p.customer_id] || 0) + (p.amount || 0);
+    });
+
     let totalPendingMonth = 0;
     let totalBilledMonth = 0;
 
-    const allCustomers = await getAll(`SELECT * FROM customers WHERE status != 'Inactive'`);
-    for (const c of allCustomers) {
-      const cLogs = await getAll(
-        `SELECT * FROM daily_logs WHERE customer_id = ? AND date >= ? AND date <= ?`,
-        [c.id, startDate, endDate]
-      );
-      const cPayments = await getAll(
-        `SELECT * FROM payments WHERE customer_id = ? AND (month_year = ? OR payment_date LIKE ?)`,
-        [c.id, currentMonth, `${currentMonth}%`]
-      );
+    allCustomers.forEach(c => {
+      const cLogs = logsMap[c.id] || [];
+      const paid = paymentsMap[c.id] || 0;
 
       let lCount = 0;
       let dCount = 0;
       let extraSum = 0;
+      let calculatedPerMealTotal = 0;
+
       cLogs.forEach(log => {
         if (log.status === 'Delivered') {
-          if (log.meal_slot === 'Lunch') lCount++;
-          if (log.meal_slot === 'Dinner') dCount++;
+          if (log.meal_slot === 'Lunch') {
+            lCount++;
+            calculatedPerMealTotal += (log.applied_lunch_rate ?? c.rate_lunch ?? 80);
+          }
+          if (log.meal_slot === 'Dinner') {
+            dCount++;
+            calculatedPerMealTotal += (log.applied_dinner_rate ?? c.rate_dinner ?? 80);
+          }
         }
         extraSum += (log.extra_amount || 0);
       });
@@ -75,15 +95,15 @@ router.get('/stats', async (req, res) => {
       if (c.plan_type === 'Monthly') {
         base = c.monthly_rate;
       } else {
-        base = (lCount * c.rate_lunch) + (dCount * c.rate_dinner);
+        base = calculatedPerMealTotal;
       }
+
       const bill = base + extraSum;
-      const paid = cPayments.reduce((sum, p) => sum + p.amount, 0);
       const due = bill - paid;
 
       totalBilledMonth += bill;
       if (due > 0) totalPendingMonth += due;
-    }
+    });
 
     res.json({
       today,
